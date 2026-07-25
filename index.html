@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DCC AI Status</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card-bg: #ffffff;
+    --border: #e3e6ea;
+    --text: #1a1d23;
+    --text-dim: #6b7280;
+    --ok: #22c55e;
+    --down: #ef4444;
+    --unknown: #d1d5db;
+    --accent: #6366f1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card-bg: #171a21;
+      --border: #2a2e37;
+      --text: #e8eaed;
+      --text-dim: #9aa0aa;
+      --unknown: #3a3f4a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --card-bg: #171a21; --border: #2a2e37;
+    --text: #e8eaed; --text-dim: #9aa0aa; --unknown: #3a3f4a;
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f8fa; --card-bg: #ffffff; --border: #e3e6ea;
+    --text: #1a1d23; --text-dim: #6b7280; --unknown: #d1d5db;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 2rem 1rem 4rem;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 2rem; }
+  header h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+  header p { color: var(--text-dim); margin: 0; font-size: .9rem; }
+
+  .overall {
+    display: flex; align-items: center; gap: .6rem;
+    justify-content: center; margin: 1.5rem 0 2rem;
+    font-size: 1.1rem; font-weight: 600;
+  }
+  .dot { width: .75rem; height: .75rem; border-radius: 50%; flex: none; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 20%, transparent); }
+  .dot.down { background: var(--down); box-shadow: 0 0 0 4px color-mix(in srgb, var(--down) 20%, transparent); }
+  .dot.unknown { background: var(--unknown); }
+
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+  }
+  .card-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: .75rem; flex-wrap: wrap; gap: .5rem;
+  }
+  .card-head h2 { font-size: 1rem; margin: 0; }
+  .card-head .uptime { font-size: .85rem; color: var(--text-dim); }
+  .card-head .status-label { font-size: .85rem; font-weight: 600; }
+  .status-label.ok { color: var(--ok); }
+  .status-label.down { color: var(--down); }
+  .status-label.unknown { color: var(--text-dim); }
+
+  .timeline {
+    display: flex; gap: 2px; overflow-x: auto; padding-bottom: 2px;
+  }
+  .bar {
+    flex: 1 0 5px; min-width: 5px; height: 32px; border-radius: 2px;
+    background: var(--unknown); cursor: pointer;
+  }
+  .bar.ok { background: var(--ok); }
+  .bar.down { background: var(--down); }
+  .timeline-labels {
+    display: flex; justify-content: space-between; margin-top: .4rem;
+    font-size: .75rem; color: var(--text-dim);
+  }
+
+  .stats-row {
+    display: flex; gap: 1.5rem; margin-top: .75rem; font-size: .8rem; color: var(--text-dim);
+  }
+  .stats-row b { color: var(--text); font-weight: 600; }
+
+  footer { text-align: center; color: var(--text-dim); font-size: .8rem; margin-top: 2rem; }
+  footer a { color: var(--accent); }
+
+  #tooltip {
+    position: fixed; pointer-events: none; background: var(--text); color: var(--bg);
+    padding: .35rem .55rem; border-radius: 6px; font-size: .75rem; display: none; z-index: 10;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>DCC AI Status</h1>
+    <p>ai.shu-dcc.net の稼働状況を5分おきに自動チェックしています</p>
+  </header>
+
+  <div class="overall" id="overall">
+    <span class="dot unknown"></span><span>読み込み中…</span>
+  </div>
+
+  <div id="cards"></div>
+
+  <footer>
+    最終チェック: <span id="last-updated">-</span><br>
+    <a href="https://github.com/M11GJ/status1" target="_blank">source on GitHub</a>
+  </footer>
+</div>
+
+<div id="tooltip"></div>
+
+<script>
+const TARGET_LABELS = {
+  ai: { name: "ai.shu-dcc.net", desc: "DCC AI 本体(チャット)" },
+  usage: { name: "usage.shu-dcc.net", desc: "利用状況ページ" },
+};
+const WINDOW_BARS = 96; // 直近8時間分(5分間隔)
+
+function fmtTime(ts) {
+  const d = new Date(ts);
+  return d.toLocaleString("ja-JP", { hour12: false });
+}
+
+function uptimePercent(checks, key, sinceMs) {
+  const cutoff = Date.now() - sinceMs;
+  const relevant = checks.filter(c => new Date(c.ts).getTime() >= cutoff && c.targets[key]);
+  if (relevant.length === 0) return null;
+  const okCount = relevant.filter(c => c.targets[key].ok).length;
+  return (okCount / relevant.length) * 100;
+}
+
+async function main() {
+  const tooltip = document.getElementById("tooltip");
+  let data;
+  try {
+    const res = await fetch("data/history.json", { cache: "no-store" });
+    data = await res.json();
+  } catch (e) {
+    document.getElementById("overall").innerHTML =
+      '<span class="dot down"></span><span>ステータスデータの取得に失敗しました</span>';
+    return;
+  }
+
+  const checks = data.checks || [];
+  const cardsEl = document.getElementById("cards");
+  const overallEl = document.getElementById("overall");
+
+  if (checks.length === 0) {
+    overallEl.innerHTML = '<span class="dot unknown"></span><span>データがまだありません</span>';
+    return;
+  }
+
+  const latest = checks[checks.length - 1];
+  document.getElementById("last-updated").textContent = fmtTime(latest.ts);
+
+  const keys = Object.keys(TARGET_LABELS).filter(k => latest.targets[k]);
+  const anyDown = keys.some(k => !latest.targets[k].ok);
+  overallEl.innerHTML = anyDown
+    ? '<span class="dot down"></span><span>一部サービスに問題が発生しています</span>'
+    : '<span class="dot ok"></span><span>すべてのサービスが正常に稼働しています</span>';
+
+  for (const key of keys) {
+    const label = TARGET_LABELS[key];
+    const recent = checks.slice(-WINDOW_BARS);
+    const up24 = uptimePercent(checks, key, 24 * 3600 * 1000);
+    const up7 = uptimePercent(checks, key, 7 * 24 * 3600 * 1000);
+    const up30 = uptimePercent(checks, key, 30 * 24 * 3600 * 1000);
+    const nowOk = latest.targets[key].ok;
+
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="card-head">
+        <h2>${label.name}</h2>
+        <span class="status-label ${nowOk ? "ok" : "down"}">${nowOk ? "稼働中" : "ダウン中"}</span>
+      </div>
+      <div class="timeline" data-key="${key}"></div>
+      <div class="timeline-labels"><span>過去8時間</span><span>現在</span></div>
+      <div class="stats-row">
+        <span>24時間: <b>${up24 !== null ? up24.toFixed(2) + "%" : "-"}</b></span>
+        <span>7日間: <b>${up7 !== null ? up7.toFixed(2) + "%" : "-"}</b></span>
+        <span>30日間: <b>${up30 !== null ? up30.toFixed(2) + "%" : "-"}</b></span>
+      </div>
+    `;
+    cardsEl.appendChild(card);
+
+    const timelineEl = card.querySelector(".timeline");
+    const padded = Array(Math.max(0, WINDOW_BARS - recent.length)).fill(null).concat(recent);
+    for (const c of padded) {
+      const bar = document.createElement("div");
+      if (c === null) {
+        bar.className = "bar";
+      } else {
+        const t = c.targets[key];
+        bar.className = "bar " + (t ? (t.ok ? "ok" : "down") : "");
+        bar.addEventListener("mousemove", (e) => {
+          tooltip.style.display = "block";
+          tooltip.style.left = e.clientX + 12 + "px";
+          tooltip.style.top = e.clientY + 12 + "px";
+          tooltip.textContent = t
+            ? `${fmtTime(c.ts)} — ${t.ok ? "OK" : "DOWN"} (HTTP ${t.status}, ${t.ms}ms)`
+            : fmtTime(c.ts);
+        });
+        bar.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+      }
+      timelineEl.appendChild(bar);
+    }
+  }
+}
+
+main();
+</script>
+</body>
+</html>
