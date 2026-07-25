@@ -57,6 +57,7 @@
   .dot.ok { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 20%, transparent); }
   .dot.down { background: var(--down); box-shadow: 0 0 0 4px color-mix(in srgb, var(--down) 20%, transparent); }
   .dot.unknown { background: var(--unknown); }
+  :root { --partial: #f59e0b; }
 
   .card {
     background: var(--card-bg);
@@ -80,11 +81,12 @@
     display: flex; gap: 2px; overflow-x: auto; padding-bottom: 2px;
   }
   .bar {
-    flex: 1 0 5px; min-width: 5px; height: 32px; border-radius: 2px;
+    flex: 1 0 5px; min-width: 5px; height: 40px; border-radius: 2px;
     background: var(--unknown); cursor: pointer;
   }
   .bar.ok { background: var(--ok); }
   .bar.down { background: var(--down); }
+  .bar.partial { background: var(--partial); }
   .timeline-labels {
     display: flex; justify-content: space-between; margin-top: .4rem;
     font-size: .75rem; color: var(--text-dim);
@@ -131,11 +133,23 @@ const TARGET_LABELS = {
   ai: { name: "ai.shu-dcc.net", desc: "DCC AI 本体(チャット)" },
   usage: { name: "usage.shu-dcc.net", desc: "利用状況ページ" },
 };
-const WINDOW_BARS = 96; // 直近8時間分(5分間隔)
+const WINDOW_DAYS = 90; // 大手ステータスページ定番の90日棒グラフ
+const TZ = "Asia/Tokyo";
 
 function fmtTime(ts) {
   const d = new Date(ts);
-  return d.toLocaleString("ja-JP", { hour12: false });
+  return d.toLocaleString("ja-JP", { hour12: false, timeZone: TZ });
+}
+
+function dayKey(ts) {
+  // JST基準の日付キー "2026-07-25"
+  const d = new Date(ts);
+  return d.toLocaleDateString("sv-SE", { timeZone: TZ }); // sv-SE -> YYYY-MM-DD形式
+}
+
+function fmtDateLabel(key) {
+  const [y, m, d] = key.split("-");
+  return `${y}/${m}/${d}`;
 }
 
 function uptimePercent(checks, key, sinceMs) {
@@ -144,6 +158,30 @@ function uptimePercent(checks, key, sinceMs) {
   if (relevant.length === 0) return null;
   const okCount = relevant.filter(c => c.targets[key].ok).length;
   return (okCount / relevant.length) * 100;
+}
+
+// 日ごとに集計 { "2026-07-25": {total, ok} }
+function aggregateByDay(checks, key) {
+  const byDay = {};
+  for (const c of checks) {
+    if (!c.targets[key]) continue;
+    const dk = dayKey(c.ts);
+    if (!byDay[dk]) byDay[dk] = { total: 0, ok: 0 };
+    byDay[dk].total += 1;
+    if (c.targets[key].ok) byDay[dk].ok += 1;
+  }
+  return byDay;
+}
+
+// 直近 N 日分のキー配列(古い→新しい順、データが無い日も含む)を作る
+function recentDayKeys(n) {
+  const keys = [];
+  const now = new Date();
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * 86400 * 1000);
+    keys.push(d.toLocaleDateString("sv-SE", { timeZone: TZ }));
+  }
+  return keys;
 }
 
 async function main() {
@@ -176,13 +214,15 @@ async function main() {
     ? '<span class="dot down"></span><span>一部サービスに問題が発生しています</span>'
     : '<span class="dot ok"></span><span>すべてのサービスが正常に稼働しています</span>';
 
+  const dayKeys = recentDayKeys(WINDOW_DAYS);
+
   for (const key of keys) {
     const label = TARGET_LABELS[key];
-    const recent = checks.slice(-WINDOW_BARS);
     const up24 = uptimePercent(checks, key, 24 * 3600 * 1000);
     const up7 = uptimePercent(checks, key, 7 * 24 * 3600 * 1000);
-    const up30 = uptimePercent(checks, key, 30 * 24 * 3600 * 1000);
+    const up90 = uptimePercent(checks, key, WINDOW_DAYS * 24 * 3600 * 1000);
     const nowOk = latest.targets[key].ok;
+    const byDay = aggregateByDay(checks, key);
 
     const card = document.createElement("div");
     card.className = "card";
@@ -192,34 +232,35 @@ async function main() {
         <span class="status-label ${nowOk ? "ok" : "down"}">${nowOk ? "稼働中" : "ダウン中"}</span>
       </div>
       <div class="timeline" data-key="${key}"></div>
-      <div class="timeline-labels"><span>過去8時間</span><span>現在</span></div>
+      <div class="timeline-labels"><span>${WINDOW_DAYS}日前</span><span>今日</span></div>
       <div class="stats-row">
         <span>24時間: <b>${up24 !== null ? up24.toFixed(2) + "%" : "-"}</b></span>
         <span>7日間: <b>${up7 !== null ? up7.toFixed(2) + "%" : "-"}</b></span>
-        <span>30日間: <b>${up30 !== null ? up30.toFixed(2) + "%" : "-"}</b></span>
+        <span>${WINDOW_DAYS}日間: <b>${up90 !== null ? up90.toFixed(2) + "%" : "-"}</b></span>
       </div>
     `;
     cardsEl.appendChild(card);
 
     const timelineEl = card.querySelector(".timeline");
-    const padded = Array(Math.max(0, WINDOW_BARS - recent.length)).fill(null).concat(recent);
-    for (const c of padded) {
+    for (const dk of dayKeys) {
       const bar = document.createElement("div");
-      if (c === null) {
+      const stat = byDay[dk];
+      if (!stat || stat.total === 0) {
         bar.className = "bar";
       } else {
-        const t = c.targets[key];
-        bar.className = "bar " + (t ? (t.ok ? "ok" : "down") : "");
-        bar.addEventListener("mousemove", (e) => {
-          tooltip.style.display = "block";
-          tooltip.style.left = e.clientX + 12 + "px";
-          tooltip.style.top = e.clientY + 12 + "px";
-          tooltip.textContent = t
-            ? `${fmtTime(c.ts)} — ${t.ok ? "OK" : "DOWN"} (HTTP ${t.status}, ${t.ms}ms)`
-            : fmtTime(c.ts);
-        });
-        bar.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+        const pct = (stat.ok / stat.total) * 100;
+        const cls = pct === 100 ? "ok" : pct === 0 ? "down" : "partial";
+        bar.className = "bar " + cls;
       }
+      bar.addEventListener("mousemove", (e) => {
+        tooltip.style.display = "block";
+        tooltip.style.left = e.clientX + 12 + "px";
+        tooltip.style.top = e.clientY + 12 + "px";
+        tooltip.textContent = stat && stat.total > 0
+          ? `${fmtDateLabel(dk)} — 稼働率 ${((stat.ok / stat.total) * 100).toFixed(1)}% (${stat.total}回チェック)`
+          : `${fmtDateLabel(dk)} — データなし`;
+      });
+      bar.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
       timelineEl.appendChild(bar);
     }
   }
